@@ -1,0 +1,325 @@
+Index: api.py
+===================================================================
+--- api.py	(revision 154)
++++ api.py	(revision 157)
+@@ -19,6 +19,18 @@
+     return [u.to_dict() for u in list]
+ 
+ 
++def get_all_games():
++    results = UserGameScore.query(projection=["game"], distinct=True).order(
++        UserGameScore.game).fetch()
++    return convert_to_json(results)
++
++
++def get_all_users():
++    results = UserGameScore.query(projection=["username"], distinct=True).order(
++        UserGameScore.username).fetch()
++    return convert_to_json(results)
++
++
+ def get_top_ten_leaderboard(game):
+     """ Return a list of the top 10 scores in the leaderboard for the given
+     game. """
+@@ -54,17 +66,20 @@
+ 
+ 
+ @ndb.transactional
+-def save_score(user, game, score):
++def save_score(user_string, game_string, score_string):
+     """ Store the user, game, and score into the datastore """
+-    score_entry = UserGameScore.get_by_id(encode_id(game, user))
++    score_entry = UserGameScore.get_by_id(encode_id(game_string, user_string))
+     if (score_entry is None):
+         # Create a new UserGameScore object
+-        score_entry = UserGameScore(game = game, username = user, score = int(score))
+-        score_entry.key = ndb.Key("UserGameScore", encode_id(game, user))
++        score_entry = UserGameScore(game = game_string, username = user_string,
++                                    score = int(score_string))
++        score_entry.key = ndb.Key("UserGameScore",
++                                  encode_id(game_string, user_string))
+         score_entry.put()
+     else:
+-        if (int(score) > score_entry.score):
+-            score_entry.score = int(score)
++        score = int(score_string)
++        if (score > score_entry.score):
++            score_entry.score = score
+             score_entry.put()
+ 
+ 
+@@ -72,29 +87,33 @@
+     """ Handler class for storing a user's score """
+ 
+     @staticmethod
+-    def validate(req):
++    def check_input_null(arg_string):
++        """ Checks if the given argument string is undefined or has 0 length """
++        if (arg_string is None or len(arg_string) == 0):
++            return True
++        return False
++
++    @staticmethod
++    def validate(self, req):
+         """ Validate the request parameters """
+-        # Check that the game and username are both strings, and that the score
+-        # is a number string.
+-        if (req["game"] is None or
+-            req["username"] is None or
+-            req["score"] is None):
++        if (self.check_input_null(req["game"]) or
++            self.check_input_null(req["username"]) or
++            self.check_input_null(req["score"])):
+             return False
+-        if (len(req["game"]) == 0 or
+-            len(req["username"]) == 0 or
+-            len(req["score"]) == 0):
+-            return False
+         if (req["score"].isdigit() == False):
+             return False
+         return True
+ 
+     def post(self):
+         """ Store the score """
++        logging.info(self.request)
+         req = json.loads(self.request.body)
+-        if (self.validate(req)):
++        if (self.validate(self, req)):
+             save_score(req["username"], req["game"], req["score"])
++            self.response.write("")
+         else:
+             self.error(400)
++            self.response.write("The score data is invalid.")
+ 
+ 
+ class GetLeaderboardHandler(webapp2.RequestHandler):
+@@ -103,9 +122,10 @@
+     def get(self, game):
+         leaderboard = get_top_ten_leaderboard(game)
+         if (leaderboard is None or len(leaderboard) == 0):
+-            return self.error(404)
++            self.error(404)
++            self.response.write("There is no leaderboard associated with '" +
++                                game + "'.")
+         self.response.write(json.dumps(leaderboard))
+-        #return json.dumps(leaderboard)
+ 
+ 
+ class GetUserHandler(webapp2.RequestHandler):
+@@ -114,9 +134,10 @@
+     def get(self, user):
+         gamelist = get_user_all_scores(user)
+         if (gamelist is None or len(gamelist) == 0):
+-            return self.error(404)
++            self.error(404)
++            self.response.write("There are no scores associated with '" +
++                                user + "'.")
+         self.response.write(json.dumps(gamelist))
+-        #return json.dumps(gamelist)
+ 
+ 
+ application = webapp2.WSGIApplication([
+Index: app.yaml
+===================================================================
+--- app.yaml	(revision 154)
++++ app.yaml	(revision 157)
+@@ -8,7 +8,7 @@
+ - url: /api/.*
+   script: api.py
+ 
+-- url: /
++- url: /.*
+   script: web.py
+ 
+ libraries:
+Index: web.py
+===================================================================
+--- web.py	(revision 154)
++++ web.py	(revision 157)
+@@ -10,46 +10,88 @@
+ import jinja2
+ import webapp2
+ import model
++import api
+ 
+ JINJA_ENVIRONMENT = jinja2.Environment(
+     loader=jinja2.FileSystemLoader(os.path.dirname(__file__)),
+     extensions=['jinja2.ext.autoescape'],
+     autoescape=True)
+ 
+-#TODO: implement
++
+ class MainPage(webapp2.RequestHandler):
++    """ Main home page """
++    def get(self):
++        template_values = {}
++        template = JINJA_ENVIRONMENT.get_template('templates/main.template')
++        self.response.write(template.render(template_values))
+ 
++
++class SaveScorePage(webapp2.RequestHandler):
++    """ Page for storing a score """
+     def get(self):
+         """ Display a form for saving a username, game, and score. """
+         template_values = {}
+         template = JINJA_ENVIRONMENT.get_template('templates/save.template')
+         self.response.write(template.render(template_values))
+ 
+-#TODO: implement
+-class GamePage(webapp2.RequestHandler):
+ 
++class GamesPage(webapp2.RequestHandler):
++    """ Lists all of the games currently in the datastore """
+     def get(self):
+-        """ Display a 1-field form for retrieving the entire leaderboard
+-        for a given game. """
+-        template_values = {}
++        gamelist = api.get_all_games()
++        template_values = {
++            'gamelist': gamelist
++        }
+         template = JINJA_ENVIRONMENT.get_template('templates/game.template')
+         self.response.write(template.render(template_values))
+ 
+-#TODO: implement
+-class UserPage(webapp2.RequestHandler):
+ 
++class GameLeaderboardPage(webapp2.RequestHandler):
++
++    def get(self, game):
++        """ Display the leaderboard for the given game """
++        leaderboard = api.get_top_ten_leaderboard(game)
++        template_values = {
++            'game': game,
++            'leaderboard': leaderboard,
++        }
++        template = JINJA_ENVIRONMENT.get_template(
++            'templates/leaderboard.template')
++        self.response.write(template.render(template_values))
++
++
++class UsersPage(webapp2.RequestHandler):
++    """ Lists all of the users currently in the datastore """
+     def get(self):
+-        """ Display a 1-field form for retrieving all of the user's games and
+-        high scores for each. """
+-        template_values = {}
++        userlist = api.get_all_users()
++        template_values = {
++            'userlist': userlist
++        }
+         template = JINJA_ENVIRONMENT.get_template('templates/user.template')
+         self.response.write(template.render(template_values))
+ 
+ 
++class UserScorePage(webapp2.RequestHandler):
++
++    def get(self, user):
++        """ Display all of the high scores for the given user """
++        gamelist = api.get_user_all_scores(user)
++        template_values = {
++            'user': user,
++            'gamelist': gamelist,
++        }
++        template = JINJA_ENVIRONMENT.get_template(
++            'templates/userboard.template')
++        self.response.write(template.render(template_values))
++
++
+ application = webapp2.WSGIApplication([
+         ('/main', MainPage),
+-        ('/game', GamePage),
+-        ('/user', UserPage)
++        ('/save', SaveScorePage),
++        ('/games', GamesPage),
++        ('/games/(\w+)', GameLeaderboardPage),
++        ('/users', UsersPage),
++        ('/users/(\w+)', UserScorePage)
+         ], debug=True)
+ 
+ if __name__ == "__main__":
+Index: templates/game.template
+===================================================================
+--- templates/game.template	(revision 154)
++++ templates/game.template	(revision 157)
+@@ -3,9 +3,9 @@
+     "http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd">
+ <html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en" >
+ <body>
+-	<form action="/api/v1/games/" method="post">
+-      <div>Game: <input type="text" name="game"></div>
+-      <div><input type="submit" value="Get Leaderboard"></div>
+-    </form>
++  <h1>Game Leaderboards</h1>
++  {% for row in gamelist %}
++    <a href="/games/{{ row.game }}">{{ row.game }}</a><p/>
++  {% endfor %}
+ </body>
+ </html>
+Index: templates/save.template
+===================================================================
+--- templates/save.template	(revision 154)
++++ templates/save.template	(revision 157)
+@@ -2,12 +2,36 @@
+ <!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN"
+     "http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd">
+ <html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en" >
+-<body>
+-	<form action="/save" method="post">
+-      <div>Name: <input type="text" name="username"></div>
+-      <div>Score: <input type="text" name="score"></div>
+-      <div>Game: <input type="text" name="game"></div>
+-      <div><input type="submit" value="Save score"></div>
++  <script src="http://ajax.googleapis.com/ajax/libs/jquery/1/jquery.min.js"
++          type="text/javascript" charset="utf-8"></script>
++  <script type="text/javascript" charset="utf-8">
++    $(document).ready(function(){
++           $(".button").click(function() {
++                var game = $("input#game").val();
++                var user = $("input#username").val();
++                var score = $("input#score").val();
++                var dataString = JSON.stringify({'game':game, 'username':user,
++                                                 'score':score});
++                $.ajax({
++                    type: "POST",
++                    url: "/save",
++                    data: dataString,
++                    success: function(data) {
++                        $('#display').html(data.text);
++                    }
++                });
++            return false;
++            });
++        });
++  </script>
++  <body>
++    <form name="saveform" method="post">
++      <div>Game: <input type="text" id="game" name="game"></div>
++      <div>Username: <input type="text" id="username" name="username"></div>
++      <div>Score: <input type="text" id="score" name="score"></div>
++      <div><input type="submit" class="button" value="Save score"
++                  id="submit_button"></div>
+     </form>
++    <div id="display"></div>
+ </body>
+-</html>
+\ No newline at end of file
++</html>
+Index: templates/user.template
+===================================================================
+--- templates/user.template	(revision 154)
++++ templates/user.template	(revision 157)
+@@ -3,9 +3,9 @@
+     "http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd">
+ <html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en" >
+ <body>
+-	<form action="/api/v1/users/" method="post">
+-      <div>Username: <input type="text" name="username"></div>
+-      <div><input type="submit" value="Get all high scores"></div>
+-    </form>
++    <h1>User List</h1>
++  {% for row in userlist %}
++    <a href="/users/{{ row.username }}">{{ row.username }}</a><p/>
++  {% endfor %}
+ </body>
+ </html>
